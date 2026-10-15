@@ -78,7 +78,8 @@ df = st.data_editor(
 
 # ---------- monthly transaction filter ----------
 df["date"] = pd.to_datetime(df["date"], errors="coerce")
-df = df.dropna(subset=["date"]).copy()
+df = df.copy()
+df["date"] = pd.to_datetime(df["date"], errors="coerce")
 df["month"] = df["date"].dt.strftime("%Y-%m")
 
 month_options = sorted(df["month"].unique())

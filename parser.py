@@ -15,7 +15,14 @@ _DATE = r"(?:\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{1,2}[ ,\-]{1,2}[
 _LINE_START = re.compile(rf"^\s*({_DATE})(?!\d)\s*(.*)$")
 _LEADING_DATE = re.compile(rf"^\s*{_DATE}(?!\d)\s*")
 _LEADING_TIME = re.compile(r"^\d{1,2}:\d{2}(?::\d{2})?\s*")
-_NUM = re.compile(r"\(?-?\d[\d,]*\.\d{2}\)?")
+_NUM = re.compile(
+    r"(?<![\w/.-])"
+    r"(?:\(\s*-?\s*)?"
+    r"-?\d[\d,]*(?:\.\d{1,2})?"
+    r"\s*\)?"
+    r"(?![\w/.-])"
+)
+
 _NOISE = re.compile(
     r"(page\s+\d+|opening balance|closing balance|total (debit|credit)|"
     r"brought forward|carried forward|statement of account|generated on)",
@@ -196,28 +203,52 @@ def _from_text(pdf):
 
 
 # ---------- public API ----------
+
 def _finalize(df):
     if df.empty:
         return df
+
     df = df.copy()
-    df["date"] = pd.to_datetime(df["date"].map(_parse_date))
-    df = df.dropna(subset=["date"])
-    for c in ("debit", "credit"):
-        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
-    df["balance"] = pd.to_numeric(df["balance"], errors="coerce")
-    df["description"] = df["description"].astype(str).str.replace(r"\s+", " ", regex=True).str.strip()
+
+    # Parse dates without deleting rows that fail validation.
+    df["date"] = pd.to_datetime(
+        df["date"].map(_parse_date),
+        errors="coerce",
+    )
+
+    for col in ("debit", "credit", "balance"):
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # Preserve missing values rather than automatically
+    # converting unrecognized monetary figures to zero.
+    df["description"] = (
+        df["description"]
+        .fillna("")
+        .astype(str)
+        .str.replace(r"\s+", " ", regex=True)
+        .str.strip()
+    )
+
     return df.reset_index(drop=True)
 
 
+
 def parse_pdf(file, password=None):
-    """Parse a text-based PDF statement (path or file-like). Raises on wrong password."""
+    """Parse a PDF and retain the extraction result with
+    the greatest number of transaction rows."""
+
     import pdfplumber
 
     with pdfplumber.open(file, password=password) as pdf:
-        df = _finalize(_from_tables(pdf))
-        if len(df) < 3:  # tables didn't work, try text lines
-            df = _finalize(_from_text(pdf))
-    return df
+        table_df = _finalize(_from_tables(pdf))
+        text_df = _finalize(_from_text(pdf))
+
+    # Prefer the result containing more rows.
+    # This is a basic safeguard, not proof of completeness.
+    if len(text_df) > len(table_df):
+        return text_df
+
+    return table_df
 
 
 def preview_text(file, password=None, pages=1):
