@@ -19,6 +19,10 @@ with st.sidebar:
         help="One rule per line: KEYWORD=Category. These override the built-in rules.",
     )
     show_raw = st.checkbox("Show raw PDF text (for debugging)")
+    hide_bad = st.checkbox(
+        "Exclude rows that failed verification from totals",
+        help="Rows marked 'mismatch' or 'unreadable' do not agree with the statement's running balance.",
+    )
 
 custom_rules = parse_custom_rules(custom_text)
 
@@ -46,6 +50,16 @@ for f in files:
         st.warning(f"**{f.name}**: no transactions found. It may be scanned (needs OCR) or an unusual layout.")
         continue
 
+    report = df.attrs.get("report", {})
+    counts = report.get("counts", {})
+    summary = (f"**{f.name}**: {report.get('verified', 0)} of {report.get('rows', len(df))} rows verified "
+               f"against the running balance (parsed via {report.get('strategy')}).")
+    if report.get("trusted"):
+        st.success(summary + " Opening/closing balance and totals agree where the statement prints them.")
+    else:
+        st.warning(summary + " Review before relying on the figures:\n\n" +
+                   "\n".join(f"- {w}" for w in report.get("warnings", [])))
+
     df["source"] = f.name
     frames.append(df)
 
@@ -53,6 +67,16 @@ if not frames:
     st.stop()
 
 df = pd.concat(frames, ignore_index=True)
+
+# Overlapping statements: the same transaction (same balance after it) must only count once.
+_key = ["date", "description", "debit", "credit", "balance"]
+_dupes = df.duplicated(subset=_key, keep="first") & df["balance"].notna()
+if _dupes.any():
+    st.info(f"Removed {int(_dupes.sum())} duplicate transaction(s) found in overlapping statements.")
+    df = df[~_dupes].reset_index(drop=True)
+
+if hide_bad:
+    df = df[~df["check"].isin(["mismatch", "unreadable"])].reset_index(drop=True)
 df["category"] = [
     categorize(d, c, db, custom_rules) for d, c, db in zip(df["description"], df["credit"], df["debit"])
 ]
@@ -72,6 +96,7 @@ df = st.data_editor(
         "credit": st.column_config.NumberColumn("Credit", format="%.2f", disabled=True),
         "balance": st.column_config.NumberColumn("Balance", format="%.2f", disabled=True),
         "source": st.column_config.TextColumn("File", disabled=True),
+        "check": st.column_config.TextColumn("Check", disabled=True, help="ok / corrected = agrees with the balance; mismatch / unreadable = review against the PDF"),
         "category": st.column_config.SelectboxColumn("Category", options=all_categories(custom_rules)),
     },
 )
@@ -82,7 +107,7 @@ df = df.copy()
 df["date"] = pd.to_datetime(df["date"], errors="coerce")
 df["month"] = df["date"].dt.strftime("%Y-%m")
 
-month_options = sorted(df["month"].unique())
+month_options = sorted(df["month"].dropna().unique())
 
 month_labels = {
     month: pd.Period(month, freq="M").strftime("%B %Y")
@@ -113,19 +138,19 @@ st.download_button(
 
 
 # ---------- summary ----------
-total_in, total_out = df["credit"].sum(), df["debit"].sum()
+total_in, total_out = filtered_df["credit"].sum(), filtered_df["debit"].sum()
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Money in", f"{total_in:,.2f}")
 c2.metric("Money out", f"{total_out:,.2f}")
 c3.metric("Net", f"{total_in - total_out:,.2f}")
-c4.metric("Transactions", f"{len(df):,}")
+c4.metric("Transactions", f"{len(filtered_df):,}")
 
 df["month"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m")
 
 left, right = st.columns(2)
 with left:
     st.subheader("Spending by category")
-    spend = df[df["debit"] > 0].groupby("category")["debit"].sum().sort_values(ascending=False)
+    spend = filtered_df[filtered_df["debit"] > 0].groupby("category")["debit"].sum().sort_values(ascending=False)
     st.bar_chart(spend)
 with right:
     st.subheader("Monthly in vs out")
@@ -136,7 +161,7 @@ with right:
 left, right = st.columns(2)
 with left:
     st.subheader("Biggest expenses")
-    top = df[df["debit"] > 0].nlargest(10, "debit")[["date", "description", "debit", "category"]]
+    top = filtered_df[filtered_df["debit"] > 0].nlargest(10, "debit")[["date", "description", "debit", "category"]]
     st.dataframe(top, hide_index=True, use_container_width=True)
 
 with right:
